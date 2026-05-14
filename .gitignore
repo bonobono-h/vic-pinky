@@ -9,3 +9,4 @@ log/*
 !log/changes.log
 !log/*.md
 *.pgm
+!maps/*.pgm
