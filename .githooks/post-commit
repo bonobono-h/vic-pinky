@@ -1,0 +1,47 @@
+#!/bin/bash
+# post-commit hook: 커밋마다 log/changes.log에 변경 이력 자동 기록
+
+# 무한 루프 방지 (로그 업데이트 커밋이 다시 훅을 호출하지 않도록)
+if [ "${SKIP_LOG_UPDATE}" = "1" ]; then
+    exit 0
+fi
+
+LOG_FILE="log/changes.log"
+TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+COMMIT_HASH=$(git log -1 --format="%h")
+COMMIT_FULL=$(git log -1 --format="%H")
+COMMIT_MSG=$(git log -1 --format="%s")
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+AUTHOR=$(git log -1 --format="%an <%ae>")
+
+# 변경된 파일 목록 (상태코드 포함)
+CHANGED=$(git diff-tree --no-commit-id -r --name-status HEAD 2>/dev/null \
+    | awk '{printf "  %-2s %s\n", $1, $2}')
+
+# 커밋 통계 (n files changed, n insertions, n deletions)
+STATS=$(git show --stat HEAD 2>/dev/null | tail -1 | sed 's/^ *//')
+
+mkdir -p "$(dirname "$LOG_FILE")"
+
+cat >> "$LOG_FILE" <<EOF
+┌─────────────────────────────────────────────┐
+│ $TIMESTAMP
+├─────────────────────────────────────────────┤
+│ 커밋   : $COMMIT_HASH
+│ 메시지 : $COMMIT_MSG
+│ 브랜치 : $BRANCH
+│ 작성자 : $AUTHOR
+├─────────────────────────────────────────────┤
+│ 변경된 파일
+$CHANGED
+│
+│ $STATS
+└─────────────────────────────────────────────┘
+
+EOF
+
+# 로그 파일이 변경된 경우에만 커밋
+git add "$LOG_FILE"
+if ! git diff --cached --quiet; then
+    SKIP_LOG_UPDATE=1 git commit -m "chore: 변경 로그 업데이트 [$TIMESTAMP]"
+fi
