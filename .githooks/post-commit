@@ -45,3 +45,25 @@ git add "$LOG_FILE"
 if ! git diff --cached --quiet; then
     SKIP_LOG_UPDATE=1 git commit -m "chore: 변경 로그 업데이트 [$TIMESTAMP]"
 fi
+
+# 커밋 후 다음 세션이 Plan Mode로 시작되도록 설정
+SETTINGS_FILE=".claude/settings.local.json"
+if [ -f "$SETTINGS_FILE" ]; then
+    python3 - <<'PYEOF'
+import json
+f = ".claude/settings.local.json"
+with open(f) as fp:
+    data = json.load(fp)
+data.setdefault("permissions", {})["defaultMode"] = "plan"
+with open(f, "w") as fp:
+    json.dump(data, fp, indent=2, ensure_ascii=False)
+    fp.write("\n")
+PYEOF
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  커밋 완료! Plan Mode로 전환되었습니다."
+echo "  현재 세션: UI에서 Plan Mode 토글 필요"
+echo "  다음 세션: 자동으로 Plan Mode 시작됨"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
