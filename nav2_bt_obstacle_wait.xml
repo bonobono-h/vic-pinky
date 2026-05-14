@@ -27,7 +27,7 @@
         <GoalUpdated/>
         <RoundRobin name="RecoveryActions">
           <!-- 1순위: 기다림 - 사람이 지나갈 때까지 대기 -->
-          <Wait wait_duration="10" is_recovery="true"/>
+          <Wait wait_duration="10"/>
           <!-- 2순위: 코스트맵 초기화 - 유령 장애물 제거 -->
           <Sequence name="ClearingActions">
             <ClearEntireCostmap name="ClearLocalCostmap-Context"
@@ -36,7 +36,7 @@
               service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
           <!-- 3순위: 한 번 더 대기 -->
-          <Wait wait_duration="10" is_recovery="true"/>
+          <Wait wait_duration="10"/>
           <!-- 4순위: 후진으로 공간 확보 -->
           <BackUp backup_dist="0.30" backup_speed="0.15" time_allowance="10"
             error_code_id="{backup_error_code}" is_recovery="true"/>
