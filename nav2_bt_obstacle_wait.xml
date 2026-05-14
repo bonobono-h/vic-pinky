@@ -39,10 +39,10 @@
           <Wait wait_duration="10"/>
           <!-- 4순위: 후진으로 공간 확보 -->
           <BackUp backup_dist="0.30" backup_speed="0.15" time_allowance="10"
-            error_code_id="{backup_error_code}" is_recovery="true"/>
+            error_code_id="{backup_error_code}"/>
           <!-- 5순위: 회전 (최후 수단) -->
           <Spin spin_dist="1.57" time_allowance="10"
-            error_code_id="{spin_error_code}" is_recovery="true"/>
+            error_code_id="{spin_error_code}"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
