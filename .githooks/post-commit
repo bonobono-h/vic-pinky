@@ -49,7 +49,8 @@ fi
 # 커밋 후 다음 세션이 Plan Mode로 시작되도록 설정
 SETTINGS_FILE=".claude/settings.local.json"
 if [ -f "$SETTINGS_FILE" ]; then
-    python3 - <<'PYEOF'
+    _TMP_PY=$(mktemp /tmp/set_plan_mode_XXXXXX.py)
+    cat > "$_TMP_PY" <<'PYEOF'
 import json
 f = ".claude/settings.local.json"
 with open(f) as fp:
@@ -59,6 +60,8 @@ with open(f, "w") as fp:
     json.dump(data, fp, indent=2, ensure_ascii=False)
     fp.write("\n")
 PYEOF
+    python3 "$_TMP_PY"
+    rm -f "$_TMP_PY"
 fi
 
 echo ""
