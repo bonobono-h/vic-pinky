@@ -120,15 +120,15 @@ controller_server:
       short_circuit_trajectory_evaluation: True
       stateful: True
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.02
-      PathAlign.scale: 14.0        # 32.0 → 14.0: 경로 방향 집착 완화
+      BaseObstacle.scale: 0.10       # 0.02 → 0.10: 벽/장애물 회피 강화
+      PathAlign.scale: 20.0
       PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 14.0        # 24.0 → 14.0: 목표 접근 각도 완화
+      GoalAlign.scale: 18.0
       GoalAlign.forward_point_distance: 0.1
-      PathDist.scale: 16.0   # 32.0 → 16.0: 경로에 덜 붙어서 문 중앙으로 자연스럽게
+      PathDist.scale: 24.0           # 경로 중앙 추종 강화 (문 중앙 통과)
       GoalDist.scale: 24.0
       RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 2.0  # 5.0 → 2.0: 회전 시 덜 버벅임
+      RotateToGoal.slowing_factor: 3.0
       RotateToGoal.lookahead_time: -1.0
 
 local_costmap:
@@ -162,8 +162,8 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 2.0
-        inflation_radius: 0.20
+        cost_scaling_factor: 3.5
+        inflation_radius: 0.30
       always_send_full_costmap: True
 
 global_costmap:
