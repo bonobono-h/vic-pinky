@@ -178,3 +178,32 @@
 │ 1 file changed, 7 insertions(+), 7 deletions(-)
 └─────────────────────────────────────────────┘
 
+┌─────────────────────────────────────────────┐
+│ 2026-05-21 20:17:46
+├─────────────────────────────────────────────┤
+│ 커밋   : 63d4655
+│ 메시지 : 20260521_1_주행마무리-RPP컨트롤러-파라미터최종
+│ 브랜치 : v2
+│ 작성자 : bonobono-h <bonobonoredh@gmail.com>
+├─────────────────────────────────────────────┤
+│ 변경된 파일
+  M  README.md
+  A  door_pass_node.py
+  M  fastdds_vicpinky.xml
+  M  nav2_bt_obstacle_wait.xml
+  M  nav2_params.yaml
+  A  pillar_filter_node.py
+  A  return_home.py
+  A  run_door_pass.sh
+  A  run_nav2.sh
+  A  run_pillar_filter.sh
+  A  run_rviz.sh
+  A  run_viewer.sh
+  A  run_web.sh
+  A  run_yolo.sh
+  A  web_control.py
+  A  yolo_nav_node.py
+│
+│ 16 files changed, 1071 insertions(+), 233 deletions(-)
+└─────────────────────────────────────────────┘
+
