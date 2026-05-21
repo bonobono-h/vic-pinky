@@ -26,23 +26,23 @@
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
         <RoundRobin name="RecoveryActions">
-          <!-- 1순위: 기다림 - 사람이 지나갈 때까지 대기 -->
-          <Wait wait_duration="10"/>
-          <!-- 2순위: 코스트맵 초기화 - 유령 장애물 제거 -->
+          <!-- 1순위: 후진 (뒤가 막히면 Collision Monitor가 자동 정지) -->
+          <BackUp backup_dist="0.20" backup_speed="0.10" time_allowance="10"
+            error_code_id="{backup_error_code}"/>
+          <!-- 2순위: 기다림 - 사람/장애물이 지나갈 때까지 대기 -->
+          <Wait wait_duration="5"/>
+          <!-- 3순위: 제자리 회전 - 새 방향으로 경로 재탐색 -->
+          <Spin spin_dist="1.57" time_allowance="15"
+            error_code_id="{spin_error_code}"/>
+          <!-- 4순위: 코스트맵 초기화 후 재경로 탐색 -->
           <Sequence name="ClearingActions">
             <ClearEntireCostmap name="ClearLocalCostmap-Context"
               service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context"
               service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <!-- 3순위: 한 번 더 대기 -->
+          <!-- 5순위: 최종 대기 -->
           <Wait wait_duration="10"/>
-          <!-- 4순위: 후진으로 공간 확보 -->
-          <BackUp backup_dist="0.30" backup_speed="0.15" time_allowance="10"
-            error_code_id="{backup_error_code}"/>
-          <!-- 5순위: 회전 (최후 수단) -->
-          <Spin spin_dist="1.57" time_allowance="10"
-            error_code_id="{spin_error_code}"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

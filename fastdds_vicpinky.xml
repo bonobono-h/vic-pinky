@@ -7,8 +7,6 @@
             <interfaceWhiteList>
                 <address>192.168.5.3</address>
             </interfaceWhiteList>
-            <sendBufferSize>1048576</sendBufferSize>
-            <receiveBufferSize>4194304</receiveBufferSize>
         </transport_descriptor>
     </transport_descriptors>
 
