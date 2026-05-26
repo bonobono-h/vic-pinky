@@ -221,3 +221,23 @@
 │ 1 file changed, 97 insertions(+)
 └─────────────────────────────────────────────┘
 
+┌─────────────────────────────────────────────┐
+│ 2026-05-26 18:11:55
+├─────────────────────────────────────────────┤
+│ 커밋   : 87abb59
+│ 메시지 : 20260526_카메라UDP전환-위치초기화-장애물버그수정
+│ 브랜치 : v2
+│ 작성자 : bonobono-h <bonobonoredh@gmail.com>
+├─────────────────────────────────────────────┤
+│ 변경된 파일
+  A  cam_udp_sender.py
+  M  follower_udp.py
+  M  nav2_params.yaml
+  A  run_cam.sh
+  M  run_nav2.sh
+  M  web_control.py
+  M  yolo_nav_node.py
+│
+│ 7 files changed, 145 insertions(+), 28 deletions(-)
+└─────────────────────────────────────────────┘
+
