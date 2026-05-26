@@ -6,31 +6,54 @@ VicPinky 웹 컨트롤 서버
 접속: http://localhost:8080
 """
 import threading
+import socket
+import numpy as np
+import cv2
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from sensor_msgs.msg import CompressedImage
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 import uvicorn
 
-# ── ROS2 노드 ────────────────────────────────────────────────
+# ── 공유 상태 ────────────────────────────────────────────────
 
 latest_frame: bytes = None
 frame_lock = threading.Lock()
 
+CAM_UDP_PORT = 5006  # VicPinky → 노트북 카메라 UDP 포트
+
+
+# ── UDP 카메라 수신 스레드 ────────────────────────────────────
+
+def _udp_cam_thread():
+    global latest_frame
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', CAM_UDP_PORT))
+    sock.settimeout(1.0)
+    while True:
+        try:
+            data, _ = sock.recvfrom(65536)
+            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+            _, enc = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            with frame_lock:
+                latest_frame = bytes(enc)
+        except socket.timeout:
+            pass
+
+threading.Thread(target=_udp_cam_thread, daemon=True).start()
+
+
+# ── ROS2 노드 ────────────────────────────────────────────────
 
 class ModePublisher(Node):
     def __init__(self):
         super().__init__('web_mode_publisher')
         self.pub = self.create_publisher(String, '/robot_mode', 10)
         self.current_mode = 'nav'
-        self.create_subscription(CompressedImage, '/image_raw/compressed', self._cam_cb, 10)
-
-    def _cam_cb(self, msg: CompressedImage):
-        global latest_frame
-        with frame_lock:
-            latest_frame = bytes(msg.data)
 
     def set_mode(self, mode: str):
         self.current_mode = mode
@@ -211,15 +234,23 @@ def set_mode(mode: str):
         ros_node.set_mode(mode)
     return {"mode": mode, "status": "ok"}
 
+def _no_camera_jpeg():
+    import numpy as np, cv2
+    img = np.zeros((240, 320, 3), dtype=np.uint8)
+    cv2.putText(img, 'NO CAMERA', (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (80, 80, 80), 2)
+    cv2.putText(img, 'run_yolo.sh ?', (70, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 60, 60), 1)
+    _, buf = cv2.imencode('.jpg', img)
+    return bytes(buf)
+
 def _mjpeg_generator():
     import time
+    no_cam = _no_camera_jpeg()
     while True:
         with frame_lock:
             frame = latest_frame
-        if frame:
-            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        else:
-            time.sleep(0.05)
+        data = frame if frame else no_cam
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
+        time.sleep(0.05)
 
 @app.get("/video")
 def video_feed():

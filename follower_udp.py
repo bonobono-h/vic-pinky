@@ -32,7 +32,7 @@ class VicPinkyUdpFollower(Node):
         self.kp = 0.005
         self.kd = 0.0
         self.max_speed = 0.30
-        self.target_distance = 0.65
+        self.target_distance = 0.90
         self.ignore_dist = 0.22
         self.deadzone = 8
         self.hist_threshold = 0.45
@@ -159,6 +159,7 @@ class VicPinkyUdpFollower(Node):
                 frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     continue
+                frame = cv2.flip(frame, -1)
 
                 self.center_x = frame.shape[1] // 2  # 동적 해상도 대응
 

@@ -7,6 +7,7 @@ VicPinky YOLO 통합 노드
 """
 import math
 import struct
+import subprocess
 import threading
 
 import cv2
@@ -72,6 +73,10 @@ class YoloNavNode(Node):
         self._cancel_client = self.create_client(
             CancelGoal, '/navigate_to_pose/_action/cancel_goal')
 
+        # AMCL 위치 재정렬 서비스 (FOLLOW→NAV 전환 시 파티클 재분산)
+        from std_srvs.srv import Empty
+        self._amcl_global_loc = self.create_client(Empty, '/reinitialize_global_localization')
+
         self.get_logger().info('YoloNavNode 시작 — 모드: nav')
 
     # ── 콜백 ────────────────────────────────────────────────
@@ -84,27 +89,45 @@ class YoloNavNode(Node):
         new_mode = msg.data.strip().lower()
         if new_mode == self.mode:
             return
+        prev_mode = self.mode
         self.mode = new_mode
-        self.get_logger().info(f'모드 전환: {self.mode}')
+        self.get_logger().info(f'모드 전환: {prev_mode} → {self.mode}')
 
         if self.mode == 'follow':
             self._cancel_nav2_goals()
+            self._stop_relay()   # Nav2가 cmd_vel 건드리지 못하게
+        elif self.mode == 'nav':
+            self._start_relay()  # Nav2 cmd_vel 체인 복구
         elif self.mode == 'stop':
             self._cancel_nav2_goals()
             self.cmd_pub.publish(Twist())
 
     def _cancel_nav2_goals(self):
         if self._cancel_client.service_is_ready():
-            req = CancelGoal.Request()  # 빈 요청 = 모든 goal 취소
+            req = CancelGoal.Request()
             self._cancel_client.call_async(req)
             self.get_logger().info('Nav2 목표 전체 취소')
         self.cmd_pub.publish(Twist())
+
+    def _stop_relay(self):
+        subprocess.run(['pkill', '-f', 'topic_tools relay'], capture_output=True)
+        self.get_logger().info('cmd_vel relay 중지 — FOLLOW 모드 단독 제어')
+
+    def _start_relay(self):
+        # 기존 relay 혹시 남아있으면 먼저 정리
+        subprocess.run(['pkill', '-f', 'topic_tools relay'], capture_output=True)
+        subprocess.Popen(
+            ['ros2', 'run', 'topic_tools', 'relay', '/cmd_vel_smoothed', '/cmd_vel'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self.get_logger().info('cmd_vel relay 재시작 — NAV 모드')
 
     def image_cb(self, msg):
         buf = np.frombuffer(msg.data, np.uint8)
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             return
+        frame = cv2.flip(frame, -1)  # 카메라 180도 회전 (거꾸로 장착)
         results = self.model(frame, verbose=False, conf=0.45)[0]
 
         if self.mode == 'follow':
@@ -181,13 +204,16 @@ class YoloNavNode(Node):
 
             # 회전 제어
             error = (cx - CAM_WIDTH / 2.0) / (CAM_WIDTH / 2.0)
-            twist.angular.z = float(np.clip(-error * 1.0, -0.7, 0.7))
+            if abs(error) < 0.08:   # 중앙 ±8% dead zone
+                twist.angular.z = 0.0
+            else:
+                twist.angular.z = float(np.clip(-error * 0.6, -0.5, 0.5))
 
             # 직진 제어
-            target = 0.8  # 목표 거리 (m)
+            target = 1.2  # 목표 거리 (m)
             if dist is not None:
                 gap = dist - target
-                twist.linear.x = float(np.clip(gap * 0.6, -0.20, 0.40))
+                twist.linear.x = float(np.clip(gap * 0.6, 0.0, 0.40))
             elif best_area > 20000:
                 twist.linear.x = 0.0
             else:
@@ -216,13 +242,13 @@ class YoloNavNode(Node):
         for i, r in enumerate(scan.ranges):
             if not (scan.range_min < r < scan.range_max):
                 continue
-            lidar_deg = a_min + i * a_inc
+            lidar_deg = (a_min + i * a_inc) % 360
             if abs(lidar_deg - angle_center) > half_w:
                 continue
             # 로봇 지지대(pillar) 각도 제외
             skip = False
             for pa in PILLAR_ANGLES_DEG:
-                if abs(lidar_deg - pa) < PILLAR_HALF_WIDTH:
+                if abs((lidar_deg - pa + 180) % 360 - 180) < PILLAR_HALF_WIDTH:
                     skip = True
                     break
             if not skip:
