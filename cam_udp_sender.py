@@ -3,8 +3,9 @@ import cv2
 import socket
 import time
 
-TARGET_IP = "192.168.5.3"
-TARGET_PORT = 5006
+TARGET_IP   = "192.168.5.3"
+TARGET_PORT = 5006   # web_control.py
+YOLO_PORT   = 5007   # yolo_nav_node.py
 FPS = 20
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -39,3 +40,4 @@ while True:
     data = enc.tobytes()
     if len(data) < 65500:
         sock.sendto(data, (TARGET_IP, TARGET_PORT))
+        sock.sendto(data, (TARGET_IP, YOLO_PORT))

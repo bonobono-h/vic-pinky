@@ -42,7 +42,12 @@ amcl:
     laser_likelihood_max_dist: 2.0
     tf_broadcast: true
     save_pose_rate: 0.5
-    set_initial_pose: false
+    set_initial_pose: true
+    initial_pose:
+      x: 2.644761717360507
+      y: -1.215629370274564
+      z: 0.0
+      yaw: 0.0862
 
 bt_navigator:
   ros__parameters:

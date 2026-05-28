@@ -144,6 +144,11 @@ HTML = """
       color: #ff6b6b;
       border: 2px solid #ff6b6b;
     }
+    .btn-home {
+      background: #1a3a1a;
+      color: #69f0ae;
+      border: 2px solid #69f0ae;
+    }
     .active { opacity: 1; }
     .inactive { opacity: 0.45; }
     small { color: #888; font-size: 0.85rem; }
@@ -195,6 +200,10 @@ HTML = """
 
   <button class="btn-stop" onclick="setMode('stop')" style="width:100%;max-width:320px;">
     🛑 정지
+  </button>
+
+  <button class="btn-home" onclick="setMode('home')" style="width:100%;max-width:320px;">
+    🏠 홈으로
   </button>
 
   <small>VicPinky Nav2 + YOLO v8 통합 시스템</small>

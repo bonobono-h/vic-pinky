@@ -72,7 +72,6 @@ class PillarFilterNode(Node):
                 if abs(angle_deg - pa) <= PILLAR_HALF_WIDTH_DEG:
                     ranges[i] = float('inf')
                     break
-
         out.ranges = ranges
         out.intensities = list(msg.intensities) if msg.intensities else []
         self.pub.publish(out)
