@@ -241,3 +241,22 @@
 │ 7 files changed, 145 insertions(+), 28 deletions(-)
 └─────────────────────────────────────────────┘
 
+┌─────────────────────────────────────────────┐
+│ 2026-05-28 21:10:02
+├─────────────────────────────────────────────┤
+│ 커밋   : 0abd709
+│ 메시지 : 20260528_아르코도킹-전진방식-홈파라미터복구-프로세스정리
+│ 브랜치 : v2
+│ 작성자 : bonobono-h <bonobonoredh@gmail.com>
+├─────────────────────────────────────────────┤
+│ 변경된 파일
+  M  cam_udp_sender.py
+  M  nav2_params.yaml
+  M  pillar_filter_node.py
+  M  run_nav2.sh
+  M  web_control.py
+  M  yolo_nav_node.py
+│
+│ 6 files changed, 358 insertions(+), 54 deletions(-)
+└─────────────────────────────────────────────┘
+
