@@ -6,6 +6,7 @@ VicPinky 웹 컨트롤 서버
 접속: http://localhost:8080
 """
 import math
+import time
 import threading
 import socket
 import numpy as np
@@ -15,9 +16,22 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import String
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 import uvicorn
+
+# ── 공구실 위치 (홈과 동일) ──────────────────────────────────
+HOME_X =  0.47947038485505556
+HOME_Y = -1.5220762188852752
+ROBOT_SPEED = 0.25  # m/s 평균 이동 속도
+
+TOOLS = {
+    'driver':  {'name': '드라이버', 'icon': '🔧'},
+    'spanner': {'name': '스패너',   'icon': '🔩'},
+    'hammer':  {'name': '망치',     'icon': '🔨'},
+    'axe':     {'name': '도끼',     'icon': '🪓'},
+}
 
 # ── 공유 상태 ────────────────────────────────────────────────
 
@@ -28,7 +42,15 @@ lidar_front: float = None
 lidar_rear:  float = None
 lidar_lock = threading.Lock()
 
-CAM_UDP_PORT = 5006  # VicPinky → 노트북 카메라 UDP 포트
+robot_x: float = 0.0
+robot_y: float = 0.0
+odom_lock = threading.Lock()
+
+selected_tool: str = None   # 현재 선택된 도구 key
+nav_start_time: float = None
+nav_lock = threading.Lock()
+
+CAM_UDP_PORT = 5006
 
 PILLAR_ANGLES_DEG = [162.0, 200.0, 245.3, 338.7, 23.3]
 PILLAR_HALF_WIDTH = 10
@@ -70,6 +92,7 @@ class ModePublisher(Node):
             depth=1,
         )
         self.create_subscription(LaserScan, '/scan', self._lidar_cb, sensor_qos)
+        self.create_subscription(Odometry, '/odom', self._odom_cb, sensor_qos)
 
     def set_mode(self, mode: str):
         self.current_mode = mode
@@ -77,6 +100,12 @@ class ModePublisher(Node):
         msg.data = mode
         self.pub.publish(msg)
         self.get_logger().info(f'모드 전환 → {mode}')
+
+    def _odom_cb(self, msg):
+        global robot_x, robot_y
+        with odom_lock:
+            robot_x = msg.pose.pose.position.x
+            robot_y = msg.pose.pose.position.y
 
     def _lidar_cb(self, msg):
         global lidar_front, lidar_rear
@@ -196,6 +225,18 @@ HTML = """
       color: #69f0ae;
       border: 2px solid #69f0ae;
     }
+    .btn-tool {
+      background: #16213e;
+      color: #eee;
+      border: 1px solid #0f3460;
+      border-radius: 12px;
+      padding: 18px;
+      font-size: 1.5rem;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn-tool:hover { background: #0f3460; }
+    .btn-tool span { display:block; font-size:0.9rem; margin-top:6px; }
     .active { opacity: 1; }
     .inactive { opacity: 0.45; }
     small { color: #888; font-size: 0.85rem; }
@@ -278,10 +319,10 @@ HTML = """
 
   <div class="btn-row">
     <button class="btn-nav" onclick="setMode('nav')">
-      🗺️ 자율주행
+      🗺️ 자율주행모드
     </button>
     <button class="btn-follow" onclick="setMode('follow')">
-      👤 사람 추종
+      👤 작업자 추종 모드
     </button>
   </div>
 
@@ -289,9 +330,49 @@ HTML = """
     🛑 정지
   </button>
 
-  <button class="btn-home" onclick="setMode('home')" style="width:100%;max-width:320px;">
-    🏠 홈으로
+  <button class="btn-home" onclick="toggleToolPanel()" style="width:100%;max-width:480px;">
+    🏠 공구실
   </button>
+
+  <!-- 도구 선택 패널 -->
+  <div id="tool-panel" style="display:none;width:100%;max-width:480px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <button class="btn-tool" onclick="selectTool('driver')">🔧<br><span>드라이버</span></button>
+      <button class="btn-tool" onclick="selectTool('spanner')">🔩<br><span>스패너</span></button>
+      <button class="btn-tool" onclick="selectTool('hammer')">🔨<br><span>망치</span></button>
+      <button class="btn-tool" onclick="selectTool('axe')">🪓<br><span>도끼</span></button>
+    </div>
+  </div>
+
+  <!-- 이동 상태 카드 -->
+  <div id="nav-card" style="display:none;width:100%;max-width:480px;background:#16213e;border:1px solid #0f3460;border-radius:12px;padding:16px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <span id="nav-icon" style="font-size:1.8rem;"></span>
+      <div>
+        <div style="font-size:0.8rem;color:#888;">이동 중</div>
+        <div id="nav-name" style="font-size:1.1rem;font-weight:bold;color:#4fc3f7;"></div>
+      </div>
+      <div id="nav-arrived" style="margin-left:auto;display:none;background:#1a3a1a;color:#69f0ae;padding:4px 12px;border-radius:20px;font-size:0.85rem;font-weight:bold;">✅ 도착!</div>
+    </div>
+    <div style="display:flex;gap:12px;">
+      <div style="flex:1;text-align:center;background:#0d0d1a;border-radius:8px;padding:10px;">
+        <div style="font-size:0.75rem;color:#888;margin-bottom:4px;">이동거리는</div>
+        <div id="nav-dist" style="font-size:1.6rem;font-weight:bold;color:#ffa502;font-variant-numeric:tabular-nums;">—</div>
+        <div style="font-size:0.8rem;color:#888;">m</div>
+      </div>
+      <div style="flex:1;text-align:center;background:#0d0d1a;border-radius:8px;padding:10px;">
+        <div style="font-size:0.75rem;color:#888;margin-bottom:4px;">예상 도착</div>
+        <div id="nav-eta" style="font-size:1.6rem;font-weight:bold;color:#2ed573;font-variant-numeric:tabular-nums;">—</div>
+        <div style="font-size:0.8rem;color:#888;">초</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 음성 명령 버튼 -->
+  <button id="mic-btn" onclick="startVoice()" style="width:100%;max-width:480px;background:#2d1b4e;color:#ce93d8;border:2px solid #ce93d8;border-radius:12px;padding:16px;font-size:1.1rem;font-weight:bold;cursor:pointer;">
+    🎤 음성 명령
+  </button>
+  <div id="voice-status" style="font-size:0.85rem;color:#888;min-height:1.2em;text-align:center;"></div>
 
   <small>VicPinky Nav2 + YOLO v8 통합 시스템</small>
 
@@ -303,15 +384,39 @@ HTML = """
       if (mode === 'nav') {
         badge.textContent = 'NAV';
         badge.className = 'mode-badge nav-badge';
+        document.getElementById('nav-card').style.display = 'none';
       } else if (mode === 'follow') {
         badge.textContent = 'FOLLOW';
         badge.className = 'mode-badge follow-badge';
-      } else {
+      } else if (mode === 'stop') {
         badge.textContent = 'STOP';
         badge.className = 'mode-badge';
         badge.style.background = '#4a0000';
         badge.style.color = '#ff6b6b';
+      } else {
+        badge.textContent = mode.toUpperCase();
+        badge.className = 'mode-badge';
+        badge.style.background = '#1a3a1a';
+        badge.style.color = '#69f0ae';
       }
+    }
+
+    function toggleToolPanel() {
+      const p = document.getElementById('tool-panel');
+      p.style.display = p.style.display === 'none' ? 'block' : 'none';
+    }
+
+    async function selectTool(key) {
+      document.getElementById('tool-panel').style.display = 'none';
+      document.getElementById('nav-card').style.display = 'block';
+      document.getElementById('nav-arrived').style.display = 'none';
+      await fetch('/tool/' + key, { method: 'POST' });
+      const badge = document.getElementById('badge');
+      badge.textContent = 'HOME';
+      badge.className = 'mode-badge';
+      badge.style.background = '#1a3a1a';
+      badge.style.color = '#69f0ae';
+      updateNavStatus();
     }
 
     function distColor(val) {
@@ -333,8 +438,155 @@ HTML = """
         re.style.color = distColor(d.rear);
       } catch(e) {}
     }
+
+    async function updateNavStatus() {
+      try {
+        const res = await fetch('/nav_status');
+        const d = await res.json();
+        if (!d.tool) return;
+        document.getElementById('nav-icon').textContent = d.tool_icon;
+        document.getElementById('nav-name').textContent = d.tool_name + ' 픽업';
+        document.getElementById('nav-dist').textContent = d.distance.toFixed(1);
+        document.getElementById('nav-eta').textContent = d.eta > 0 ? d.eta : '0';
+        if (d.arrived) {
+          document.getElementById('nav-arrived').style.display = 'block';
+          document.getElementById('nav-dist').style.color = '#2ed573';
+        } else {
+          document.getElementById('nav-dist').style.color = '#ffa502';
+        }
+      } catch(e) {}
+    }
+
     setInterval(updateDist, 300);
+    setInterval(updateNavStatus, 500);
     updateDist();
+
+    // ── 음성 명령 ──────────────────────────────────────────────
+    const TOOL_KEYWORDS = {
+      '드라이버': 'driver',
+      '스패너':   'spanner',
+      '망치':     'hammer',
+      '도끼':     'axe',
+    };
+
+    let voiceToolName = null;
+    let arrivedSpoken = false;
+
+    function speak(text, onEnd) {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'ko-KR';
+      u.rate = 1.05;
+      if (onEnd) u.onend = onEnd;
+      window.speechSynthesis.speak(u);
+    }
+
+    function startVoice() {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) {
+        alert('이 브라우저는 음성 인식을 지원하지 않아요. Chrome을 사용해주세요.');
+        return;
+      }
+      const rec = new SR();
+      rec.lang = 'ko-KR';
+      rec.interimResults = false;
+      rec.maxAlternatives = 3;
+
+      const btn = document.getElementById('mic-btn');
+      const status = document.getElementById('voice-status');
+      btn.style.background = '#4a0060';
+      btn.textContent = '🔴 듣는 중...';
+      status.textContent = '말씀하세요...';
+
+      rec.onresult = (e) => {
+        const candidates = Array.from(e.results[0]).map(r => r.transcript);
+        status.textContent = '인식: ' + candidates[0];
+        let matched = null;
+        outer: for (const text of candidates) {
+          for (const [kw, key] of Object.entries(TOOL_KEYWORDS)) {
+            if (text.includes(kw)) { matched = { kw, key }; break outer; }
+          }
+        }
+        if (matched) {
+          voiceToolName = matched.kw;
+          arrivedSpoken = false;
+          (async () => {
+            await fetch('/tool/' + matched.key, { method: 'POST' });
+            let distText = '';
+            try {
+              const ns = await fetch('/nav_status');
+              const nd = await ns.json();
+              const dist = nd.distance;
+              const eta  = nd.eta;
+              if (dist > 0.3) {
+                distText = ` 이동거리는 약 ${dist.toFixed(0)}미터~ 정도이고, 소요시간은 약 ${eta}초~ 정도입니다.`;
+              }
+            } catch(e) {}
+            speak(`알겠습니다! ${matched.kw} 가지러 출발합니다~${distText}`);
+            // UI 업데이트
+            document.getElementById('tool-panel').style.display = 'none';
+            document.getElementById('nav-card').style.display = 'block';
+            document.getElementById('nav-arrived').style.display = 'none';
+            const badge = document.getElementById('badge');
+            badge.textContent = 'HOME';
+            badge.className = 'mode-badge';
+            badge.style.background = '#1a3a1a';
+            badge.style.color = '#69f0ae';
+          })();
+        } else if (candidates[0].trim().length > 0) {
+          speak('등록이 되지 않은 공구입니다.');
+          status.textContent = `❌ 미등록 공구: "${candidates[0]}"`;
+        } else {
+          speak('죄송해요, 다시 말씀해주세요.');
+          status.textContent = '❓ 인식 실패 — 다시 시도해보세요';
+        }
+      };
+
+      rec.onerror = (e) => { status.textContent = '오류: ' + e.error; };
+      rec.onend = () => {
+        btn.style.background = '#2d1b4e';
+        btn.textContent = '🎤 음성 명령';
+      };
+      rec.start();
+    }
+
+    // selectTool에 도구명 파라미터 추가 버전
+    async function selectTool(key, toolName) {
+      document.getElementById('tool-panel').style.display = 'none';
+      document.getElementById('nav-card').style.display = 'block';
+      document.getElementById('nav-arrived').style.display = 'none';
+      arrivedSpoken = false;
+      await fetch('/tool/' + key, { method: 'POST' });
+      const badge = document.getElementById('badge');
+      badge.textContent = 'HOME';
+      badge.className = 'mode-badge';
+      badge.style.background = '#1a3a1a';
+      badge.style.color = '#69f0ae';
+    }
+
+    // nav 상태 폴링 — 도착 시 TTS
+    const _origUpdateNavStatus = updateNavStatus;
+    async function updateNavStatus() {
+      try {
+        const res = await fetch('/nav_status');
+        const d = await res.json();
+        if (!d.tool) return;
+        document.getElementById('nav-icon').textContent = d.tool_icon;
+        document.getElementById('nav-name').textContent = d.tool_name + ' 픽업';
+        document.getElementById('nav-dist').textContent = d.distance.toFixed(1);
+        document.getElementById('nav-eta').textContent = d.eta > 0 ? d.eta : '0';
+        if (d.arrived) {
+          document.getElementById('nav-arrived').style.display = 'block';
+          document.getElementById('nav-dist').style.color = '#2ed573';
+          if (!arrivedSpoken && voiceToolName) {
+            arrivedSpoken = true;
+            speak(`다녀왔어요! ${voiceToolName}를 가져왔습니다`);
+          }
+        } else {
+          document.getElementById('nav-dist').style.color = '#ffa502';
+        }
+      } catch(e) {}
+    }
   </script>
 </body>
 </html>
@@ -346,11 +598,44 @@ def index():
 
 @app.post("/mode/{mode}")
 def set_mode(mode: str):
-    import time
-    time.sleep(0.1)  # ROS2 노드 초기화 대기
+    time.sleep(0.1)
     if ros_node:
         ros_node.set_mode(mode)
     return {"mode": mode, "status": "ok"}
+
+@app.post("/tool/{tool_key}")
+def select_tool(tool_key: str):
+    global selected_tool, nav_start_time
+    if tool_key not in TOOLS:
+        return {"status": "error", "msg": "unknown tool"}
+    with nav_lock:
+        selected_tool = tool_key
+        nav_start_time = time.time()
+    time.sleep(0.1)
+    if ros_node:
+        ros_node.set_mode('home')
+    return {"status": "ok", "tool": tool_key}
+
+@app.get("/nav_status")
+def nav_status():
+    with odom_lock:
+        rx, ry = robot_x, robot_y
+    with nav_lock:
+        tool = selected_tool
+        start = nav_start_time
+    one_way = math.sqrt((HOME_X - rx) ** 2 + (HOME_Y - ry) ** 2)
+    dist = round(one_way * 2, 2)  # 왕복 거리
+    eta = round(dist / ROBOT_SPEED) if one_way > 0.1 else 0
+    elapsed = round(time.time() - start) if start else 0
+    return {
+        "tool": tool,
+        "tool_name": TOOLS[tool]['name'] if tool else None,
+        "tool_icon": TOOLS[tool]['icon'] if tool else None,
+        "distance": round(dist, 2),
+        "eta": eta,
+        "elapsed": elapsed,
+        "arrived": dist < 0.3,
+    }
 
 def _no_camera_jpeg():
     import numpy as np, cv2
