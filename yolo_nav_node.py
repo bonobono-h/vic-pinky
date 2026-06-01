@@ -17,6 +17,7 @@ import numpy as np
 import rclpy
 from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -27,10 +28,10 @@ from std_msgs.msg import String
 from ultralytics import YOLO
 
 # ── 홈 위치 ──────────────────────────────────────────────────
-HOME_X   =  2.644761717360507
-HOME_Y   = -1.215629370274564
-HOME_QZ  =  0.043083
-HOME_QW  =  0.999071
+HOME_X   =  0.47947038485505556
+HOME_Y   = -1.5220762188852752
+HOME_QZ  =  0.9999819339186962
+HOME_QW  =  0.006010976312070989
 
 # ── 카메라 설정 ──────────────────────────────────────────────
 CAM_WIDTH   = 640
@@ -48,7 +49,8 @@ DOCK_MARKER_ID  = 0       # HOME 도킹 마커
 PARK_MARKER_ID  = 1       # 주차 마커
 MARKER_REAL_SIZE = 0.15   # 마커 실제 크기 (m)
 ARUCO_TRIGGER_DIST  = 2.35  # 이 거리 이내 감지 시 도킹 시작 (m)
-DOCK_APPROACH_STOP  = 0.25  # 전진 도킹: 마커/전방 라이다 이 거리 이하 → 완료 (m)
+DOCK_APPROACH_STOP  = 0.58  # 후진 도킹: 후방 라이다 이 거리 이하 → 완료 (m)
+DOCK_APPROACH_FRONT_MIN = 3.0  # 도킹 완료 조건: 전방 라이다 이 거리 이상이어야 함 (m)
 MAX_APPROACH_DURATION = 30.0  # 전진 도킹 타임아웃 (s)
 
 # ── 주차 위치 ────────────────────────────────────────────────
@@ -89,6 +91,9 @@ class YoloNavNode(Node):
         self.dock_approach_start = None
         self.dock_target = None  # 'home' or 'park'
         self.docked = False       # 도킹 완료 상태 (탈출 전진 필요)
+        self.align_ok_count = 0   # 연속 정렬 완료 프레임 수
+        self.backing_start_yaw = None  # 후진 시작 방향 (직선 유지용)
+        self.current_yaw = 0.0
 
         # UDP 카메라 최신 프레임
         self.latest_frame = None
@@ -104,6 +109,7 @@ class YoloNavNode(Node):
         # 구독
         self.create_subscription(LaserScan, '/scan',       self.lidar_cb, sensor_qos)
         self.create_subscription(String,    '/robot_mode', self.mode_cb,  10)
+        self.create_subscription(Odometry,  '/odom',       self._odom_cb, sensor_qos)
 
         # 퍼블리셔
         self.cmd_pub      = self.create_publisher(Twist,       '/cmd_vel',           10)
@@ -154,6 +160,12 @@ class YoloNavNode(Node):
         with self.lock:
             self.scan = msg
 
+    def _odom_cb(self, msg):
+        q = msg.pose.pose.orientation
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self.current_yaw = math.atan2(siny, cosy)
+
     def mode_cb(self, msg):
         new_mode = msg.data.strip().lower()
         if new_mode == self.mode and self.dock_state is None and not self.docked:
@@ -166,6 +178,7 @@ class YoloNavNode(Node):
         if self.mode == 'follow':
             self._cancel_nav2_goals()
             self._stop_relay()
+
         elif self.mode == 'nav':
             if self.docked:
                 self._cancel_nav2_goals()
@@ -174,6 +187,7 @@ class YoloNavNode(Node):
             else:
                 self._start_relay()
         elif self.mode == 'home':
+            self.docked = False
             self._cancel_nav2_goals()
             self._start_relay()
             self._go_home()
@@ -186,16 +200,16 @@ class YoloNavNode(Node):
             self.cmd_pub.publish(Twist())
 
     def _exit_dock(self):
-        """도킹 완료 위치에서 탈출: 후진으로 전방 라이다 2m 이상 이격"""
-        self.get_logger().info('🔙 도킹 탈출: 후진 중...')
+        """도킹 완료 위치에서 탈출: 전진으로 후방 라이다 2m 이상 이격"""
+        self.get_logger().info('🔙 도킹 탈출: 전진 중...')
         twist = Twist()
-        twist.linear.x = -0.15
+        twist.linear.x = 0.15
         start = self.get_clock().now()
         import time as _time
         while True:
             elapsed = (self.get_clock().now() - start).nanoseconds / 1e9
-            front = self._lidar_front_distance()
-            if front is not None and front > 2.0:
+            rear = self._lidar_rear_distance()
+            if rear is not None and rear > 2.0:
                 break
             if elapsed > 20.0:
                 self.get_logger().warn('⚠️ 도킹 탈출 타임아웃')
@@ -247,9 +261,17 @@ class YoloNavNode(Node):
         if not handle.accepted:
             self.get_logger().warn('🏠 홈 목표 거부됨')
             return
-        handle.get_result_async().add_done_callback(
-            lambda f: self.get_logger().info('🏠 Nav2 홈 도착 완료')
-        )
+        def _on_arrive(f):
+            if self.dock_state is not None or self.docked:
+                self.get_logger().info('🏠 _on_arrive 무시 — 이미 도킹 진행/완료')
+                return
+            self.get_logger().info('🏠 Nav2 홈 도착 — 정렬 후 후진 도킹')
+            self._stop_relay()
+            self.dock_target = 'home'
+            self.dock_state = 'aligning'
+            self.align_ok_count = 0
+            self.backing_start_yaw = None
+        handle.get_result_async().add_done_callback(_on_arrive)
 
     def _cancel_nav2_goals(self):
         if self._cancel_client.service_is_ready():
@@ -261,6 +283,21 @@ class YoloNavNode(Node):
     def _stop_relay(self):
         subprocess.run(['pkill', '-f', 'topic_tools relay'], capture_output=True)
         self.get_logger().info('cmd_vel relay 중지')
+
+    def _start_follower(self):
+        subprocess.run(['pkill', '-f', 'follower_udp.py'], capture_output=True)
+        import os
+        env = os.environ.copy()
+        subprocess.Popen(
+            ['python3', '/home/hong/dev_ws/vic_pinky/follower_udp.py'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env
+        )
+        self.get_logger().info('👤 follower_udp.py 시작')
+
+    def _stop_follower(self):
+        subprocess.run(['pkill', '-f', 'follower_udp.py'], capture_output=True)
+        self.cmd_pub.publish(Twist())
+        self.get_logger().info('👤 follower_udp.py 종료')
 
     def _start_relay(self):
         subprocess.run(['pkill', '-f', 'topic_tools relay'], capture_output=True)
@@ -279,14 +316,15 @@ class YoloNavNode(Node):
             self._publish_debug(annotated, 'DOCKING')
             return
 
+        # ── follow 모드: follower_udp.py가 처리하므로 YOLO 스킵 ──
+        if self.mode == 'follow':
+            return
+
         results = self.model(frame, verbose=False, conf=0.45)[0]
 
-        if self.mode == 'follow':
-            self._follow(frame, results)
-        elif self.mode in ('home', 'park'):
-            # 이동 중 ArUco 마커 감지 → 트리거
+        if self.mode in ('home', 'park'):
+            # 이동 중 ArUco 마커 감지 → 트리거 (장애물 발행 안 함)
             self._check_aruco_trigger(frame)
-            self._nav_obstacles(frame, results)
         else:
             self._nav_obstacles(frame, results)
 
@@ -330,11 +368,13 @@ class YoloNavNode(Node):
         idx = list(flat).index(target_id)
         dist = self._aruco_distance(corners[idx])
         if dist is not None and dist <= ARUCO_TRIGGER_DIST:
-            self.get_logger().info(f'🎯 ArUco ID{target_id} 감지! {dist:.2f}m — 도킹 시작')
+            self.get_logger().info(f'🎯 ArUco ID{target_id} 감지! {dist:.2f}m — 정렬 후 후진 도킹')
             self._cancel_nav2_goals()
             self._stop_relay()
-            self.dock_target = self.mode  # 'home' or 'park'
+            self.dock_target = self.mode
             self.dock_state = 'aligning'
+            self.align_ok_count = 0
+            self.backing_start_yaw = None
 
     # ── ArUco 도킹 스텝 ──────────────────────────────────────
 
@@ -351,14 +391,19 @@ class YoloNavNode(Node):
                 idx = list(ids.flatten()).index(active_marker_id)
                 cx = corners[idx][0][:, 0].mean()
                 error = (cx - CAM_WIDTH / 2.0) / (CAM_WIDTH / 2.0)
-                if abs(error) < 0.06:
-                    self.dock_state = 'approaching'
-                    self.dock_approach_start = self.get_clock().now()
-                    self.get_logger().info('➡️ 마커 정렬 완료 — 전진 도킹 시작')
+                if abs(error) < 0.10:
+                    self.align_ok_count += 1
+                    if self.align_ok_count >= 3:
+                        self.dock_state = 'approaching'
+                        self.dock_approach_start = self.get_clock().now()
+                        self.align_ok_count = 0
+                        self.get_logger().info('➡️ 마커 정렬 완료 — 후진 도킹 시작')
                 else:
-                    twist.angular.z = float(np.clip(-error * 0.5, -0.4, 0.4))
+                    self.align_ok_count = 0
+                    twist.angular.z = float(np.clip(-error * 0.35, -0.4, 0.4))
             else:
-                twist.angular.z = 0.2
+                self.align_ok_count = 0
+                twist.angular.z = 0.15
             self.cmd_pub.publish(twist)
             cv2.putText(annotated, 'ALIGNING', (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
@@ -370,9 +415,7 @@ class YoloNavNode(Node):
             if ids is not None and active_marker_id in ids.flatten():
                 idx = list(ids.flatten()).index(active_marker_id)
                 dist = self._aruco_distance(corners[idx])
-                cx = corners[idx][0][:, 0].mean()
-                error = (cx - CAM_WIDTH / 2.0) / (CAM_WIDTH / 2.0)
-                steer = float(np.clip(-error * 0.3, -0.3, 0.3))
+            rear = self._lidar_rear_distance()
             front = self._lidar_front_distance()
 
             if elapsed > MAX_APPROACH_DURATION:
@@ -381,23 +424,28 @@ class YoloNavNode(Node):
                 self.dock_target = None
                 self.mode = 'nav'
                 self._start_relay()
-                self.get_logger().warn('⛔ 전진 도킹 타임아웃 — 중단')
-            elif (dist is not None and dist < DOCK_APPROACH_STOP) or \
-                 (front is not None and front < DOCK_APPROACH_STOP):
+                self.get_logger().warn('⛔ 후진 도킹 타임아웃 — 중단')
+            elif (rear is not None and rear <= DOCK_APPROACH_STOP and
+                  (front is None or front >= DOCK_APPROACH_FRONT_MIN)):
                 self.cmd_pub.publish(Twist())
                 label = '🅿️ 주차 완료!' if self.dock_target == 'park' else '🏠 ArUco 도킹 완료!'
                 self.dock_state = None
                 self.dock_target = None
                 self.mode = 'nav'
                 self.docked = True
-                self.get_logger().info(label + ' — nav 명령 시 2m 후진 탈출')
+                self.get_logger().info(label + ' — nav 명령 시 전진 2m 탈출')
             else:
-                twist.linear.x = 0.10
-                twist.angular.z = steer
+                if self.backing_start_yaw is None:
+                    self.backing_start_yaw = self.current_yaw
+                yaw_err = self.current_yaw - self.backing_start_yaw
+                while yaw_err >  math.pi: yaw_err -= 2 * math.pi
+                while yaw_err < -math.pi: yaw_err += 2 * math.pi
+                twist.linear.x = -0.10
+                twist.angular.z = float(np.clip(-yaw_err * 2.0, -0.3, 0.3))
                 self.cmd_pub.publish(twist)
             dist_str = f'{dist:.2f}m' if dist else '?'
-            front_str = f'{front:.2f}m' if front else '?'
-            cv2.putText(annotated, f'APPROACH dist:{dist_str} front:{front_str}', (10, 60),
+            rear_str = f'{rear:.2f}m' if rear else '?'
+            cv2.putText(annotated, f'APPROACH dist:{dist_str} rear:{rear_str}', (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
         return annotated
@@ -429,7 +477,7 @@ class YoloNavNode(Node):
             if not (scan.range_min < r < scan.range_max):
                 continue
             lidar_deg = (a_min + i * a_inc) % 360
-            if not (lidar_deg <= 30 or lidar_deg >= 330):
+            if not (150 <= lidar_deg <= 210):
                 continue
             skip = False
             for pa in PILLAR_ANGLES_DEG:
@@ -438,7 +486,10 @@ class YoloNavNode(Node):
                     break
             if not skip:
                 distances.append(r)
-        return min(distances) if distances else None
+        if not distances:
+            return None
+        distances.sort()
+        return distances[len(distances) // 2]
 
     # ── 후방 라이다 거리 ─────────────────────────────────────
 
@@ -454,7 +505,7 @@ class YoloNavNode(Node):
             if not (scan.range_min < r < scan.range_max):
                 continue
             lidar_deg = (a_min + i * a_inc) % 360
-            if not (150 <= lidar_deg <= 210):
+            if not (lidar_deg <= 30 or lidar_deg >= 330):
                 continue
             skip = False
             for pa in PILLAR_ANGLES_DEG:

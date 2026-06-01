@@ -5,13 +5,16 @@ VicPinky 웹 컨트롤 서버
 실행: python3 web_control.py
 접속: http://localhost:8080
 """
+import math
 import threading
 import socket
 import numpy as np
 import cv2
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import String
+from sensor_msgs.msg import LaserScan
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 import uvicorn
@@ -21,7 +24,14 @@ import uvicorn
 latest_frame: bytes = None
 frame_lock = threading.Lock()
 
+lidar_front: float = None
+lidar_rear:  float = None
+lidar_lock = threading.Lock()
+
 CAM_UDP_PORT = 5006  # VicPinky → 노트북 카메라 UDP 포트
+
+PILLAR_ANGLES_DEG = [162.0, 200.0, 245.3, 338.7, 23.3]
+PILLAR_HALF_WIDTH = 10
 
 
 # ── UDP 카메라 수신 스레드 ────────────────────────────────────
@@ -54,6 +64,12 @@ class ModePublisher(Node):
         super().__init__('web_mode_publisher')
         self.pub = self.create_publisher(String, '/robot_mode', 10)
         self.current_mode = 'nav'
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=1,
+        )
+        self.create_subscription(LaserScan, '/scan', self._lidar_cb, sensor_qos)
 
     def set_mode(self, mode: str):
         self.current_mode = mode
@@ -61,6 +77,37 @@ class ModePublisher(Node):
         msg.data = mode
         self.pub.publish(msg)
         self.get_logger().info(f'모드 전환 → {mode}')
+
+    def _lidar_cb(self, msg):
+        global lidar_front, lidar_rear
+        front = self._calc_distance(msg, front=True)
+        rear  = self._calc_distance(msg, front=False)
+        with lidar_lock:
+            lidar_front = front
+            lidar_rear  = rear
+
+    def _calc_distance(self, scan, front: bool):
+        a_min = math.degrees(scan.angle_min)
+        a_inc = math.degrees(scan.angle_increment)
+        distances = []
+        for i, r in enumerate(scan.ranges):
+            if not (scan.range_min < r < scan.range_max):
+                continue
+            deg = (a_min + i * a_inc) % 360
+            if front:
+                in_zone = 150 <= deg <= 210
+            else:
+                in_zone = deg <= 30 or deg >= 330
+            if not in_zone:
+                continue
+            if any(abs((deg - pa + 180) % 360 - 180) < PILLAR_HALF_WIDTH
+                   for pa in PILLAR_ANGLES_DEG):
+                continue
+            distances.append(r)
+        if not distances:
+            return None
+        distances.sort()
+        return round(distances[len(distances) // 2], 2)
 
 
 ros_node: ModePublisher = None
@@ -174,6 +221,33 @@ HTML = """
       padding: 2px 8px;
       border-radius: 8px;
     }
+    .dist-panel {
+      display: flex;
+      gap: 16px;
+      width: 100%;
+      max-width: 480px;
+    }
+    .dist-card {
+      flex: 1;
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 12px;
+      padding: 12px 16px;
+      text-align: center;
+    }
+    .dist-label {
+      font-size: 0.75rem;
+      color: #888;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+    .dist-value {
+      font-size: 1.8rem;
+      font-weight: bold;
+      font-variant-numeric: tabular-nums;
+      transition: color 0.3s;
+    }
+    .dist-unit { font-size: 0.9rem; color: #888; }
   </style>
 </head>
 <body>
@@ -182,6 +256,19 @@ HTML = """
   <div class="cam-box">
     <span class="cam-label">LIVE CAM</span>
     <img src="/video" alt="카메라 없음 / 미연결">
+  </div>
+
+  <div class="dist-panel">
+    <div class="dist-card">
+      <div class="dist-label">▲ 전방</div>
+      <div class="dist-value" id="dist-front">—</div>
+      <div class="dist-unit">m</div>
+    </div>
+    <div class="dist-card">
+      <div class="dist-label">▼ 후방</div>
+      <div class="dist-value" id="dist-rear">—</div>
+      <div class="dist-unit">m</div>
+    </div>
   </div>
 
   <div class="status-box">
@@ -226,6 +313,28 @@ HTML = """
         badge.style.color = '#ff6b6b';
       }
     }
+
+    function distColor(val) {
+      if (val === null) return '#555';
+      if (val < 0.4)  return '#ff4757';
+      if (val < 1.0)  return '#ffa502';
+      return '#2ed573';
+    }
+
+    async function updateDist() {
+      try {
+        const res = await fetch('/distances');
+        const d = await res.json();
+        const fe = document.getElementById('dist-front');
+        const re = document.getElementById('dist-rear');
+        fe.textContent = d.front !== null ? d.front.toFixed(2) : '—';
+        re.textContent = d.rear  !== null ? d.rear.toFixed(2)  : '—';
+        fe.style.color = distColor(d.front);
+        re.style.color = distColor(d.rear);
+      } catch(e) {}
+    }
+    setInterval(updateDist, 300);
+    updateDist();
   </script>
 </body>
 </html>
@@ -271,6 +380,11 @@ def video_feed():
 @app.get("/status")
 def status():
     return {"mode": ros_node.current_mode if ros_node else "unknown"}
+
+@app.get("/distances")
+def distances():
+    with lidar_lock:
+        return {"front": lidar_front, "rear": lidar_rear}
 
 
 if __name__ == '__main__':
