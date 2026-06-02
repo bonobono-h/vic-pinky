@@ -49,9 +49,15 @@ DOCK_MARKER_ID  = 0       # HOME 도킹 마커
 PARK_MARKER_ID  = 1       # 주차 마커
 MARKER_REAL_SIZE = 0.15   # 마커 실제 크기 (m)
 ARUCO_TRIGGER_DIST  = 2.35  # 이 거리 이내 감지 시 도킹 시작 (m)
-DOCK_APPROACH_STOP  = 0.58  # 후진 도킹: 후방 라이다 이 거리 이하 → 완료 (m)
+DOCK_APPROACH_STOP  = 0.65  # 후진 도킹: 후방 라이다 이 거리 이하 → 완료 (m, 관성/지연 여유 포함)
 DOCK_APPROACH_FRONT_MIN = 3.0  # 도킹 완료 조건: 전방 라이다 이 거리 이상이어야 함 (m)
 MAX_APPROACH_DURATION = 30.0  # 전진 도킹 타임아웃 (s)
+
+# ── 작업장 위치 ──────────────────────────────────────────────
+WORKSTATIONS = {
+    1: (-8.3141, -11.1439, -0.4356, 0.9001),
+    2: (-7.0176,  -5.0872,  0.0515, 0.9987),
+}
 
 # ── 주차 위치 ────────────────────────────────────────────────
 PARK_X  = HOME_X
@@ -90,10 +96,12 @@ class YoloNavNode(Node):
         self.dock_state = None
         self.dock_approach_start = None
         self.dock_target = None  # 'home' or 'park'
+        self.backing_start_rear = None  # 후진 시작 시점 후방 거리
         self.docked = False       # 도킹 완료 상태 (탈출 전진 필요)
         self.align_ok_count = 0   # 연속 정렬 완료 프레임 수
         self.backing_start_yaw = None  # 후진 시작 방향 (직선 유지용)
         self.current_yaw = 0.0
+        self.delivery_station = None  # 배달 목적지 작업장 번호
 
         # UDP 카메라 최신 프레임
         self.latest_frame = None
@@ -112,9 +120,10 @@ class YoloNavNode(Node):
         self.create_subscription(Odometry,  '/odom',       self._odom_cb, sensor_qos)
 
         # 퍼블리셔
-        self.cmd_pub      = self.create_publisher(Twist,       '/cmd_vel',           10)
-        self.obstacle_pub = self.create_publisher(PointCloud2, '/camera_obstacles',  10)
-        self.debug_pub    = self.create_publisher(Image,       '/yolo_debug',        10)
+        self.cmd_pub           = self.create_publisher(Twist,       '/cmd_vel',           10)
+        self.obstacle_pub      = self.create_publisher(PointCloud2, '/camera_obstacles',  10)
+        self.debug_pub         = self.create_publisher(Image,       '/yolo_debug',        10)
+        self.delivery_done_pub = self.create_publisher(String,      '/delivery_done',     10)
 
         # Nav2 goal 전체 취소 서비스 클라이언트
         self._cancel_client = self.create_client(
@@ -188,9 +197,28 @@ class YoloNavNode(Node):
                 self._start_relay()
         elif self.mode == 'home':
             self.docked = False
+            self.delivery_station = None
             self._cancel_nav2_goals()
             self._start_relay()
             self._go_home()
+        elif self.mode.startswith('deliver_'):
+            station = int(self.mode.split('_')[1])
+            self.docked = False
+            self.delivery_station = station
+            self._cancel_nav2_goals()
+            self._start_relay()
+            self._go_home()
+            self.get_logger().info(f'🚚 배달 모드: 공구실 → {station}번 작업장')
+        elif self.mode.startswith('goto_'):
+            try:
+                station = int(self.mode.split('_')[1])
+                self.get_logger().info(f'[goto] station={station} 진입')
+                self._cancel_nav2_goals()
+                self._start_relay()
+                self._go_workstation(station)
+                self.get_logger().info(f'📍 {station}번 작업장으로 직접 이동')
+            except Exception as e:
+                self.get_logger().error(f'[goto] 예외 발생: {e}')
         elif self.mode == 'park':
             self._cancel_nav2_goals()
             self._start_relay()
@@ -220,6 +248,45 @@ class YoloNavNode(Node):
         self.docked = False
         self.get_logger().info('✅ 도킹 탈출 완료 — Nav 시작')
         self._start_relay()
+        if self.delivery_station is not None:
+            station = self.delivery_station
+            self.delivery_station = None
+            self.get_logger().info(f'🚚 {station}번 작업장으로 이동 시작')
+            threading.Thread(target=self._go_workstation, args=(station,), daemon=True).start()
+
+    def _go_workstation(self, station: int):
+        pos = WORKSTATIONS.get(station)
+        if not pos:
+            self.get_logger().warn(f'{station}번 작업장 좌표 없음')
+            return
+        x, y, qz, qw = pos
+        if not self._nav_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().warn('NavigateToPose 서버 없음')
+            return
+        goal = NavigateToPose.Goal()
+        goal.pose = PoseStamped()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = x
+        goal.pose.pose.position.y = y
+        goal.pose.pose.orientation.z = qz
+        goal.pose.pose.orientation.w = qw
+        goal.behavior_tree = ''
+        future = self._nav_client.send_goal_async(goal)
+
+        def _on_accept(f):
+            handle = f.result()
+            if not handle.accepted:
+                return
+            def _on_arrive(f2):
+                self.get_logger().info(f'✅ {station}번 작업장 도착!')
+                msg = String()
+                msg.data = str(station)
+                self.delivery_done_pub.publish(msg)
+            handle.get_result_async().add_done_callback(_on_arrive)
+
+        future.add_done_callback(_on_accept)
+        self.get_logger().info(f'📍 {station}번 작업장 목표 전송: ({x:.2f}, {y:.2f})')
 
     def _go_home(self):
         if not self._nav_client.wait_for_server(timeout_sec=3.0):
@@ -418,21 +485,26 @@ class YoloNavNode(Node):
             rear = self._lidar_rear_distance()
             front = self._lidar_front_distance()
 
+            if rear is not None and self.backing_start_rear is None:
+                self.backing_start_rear = rear
+            moved = (self.backing_start_rear - rear) if (self.backing_start_rear and rear) else 0.0
+
             if elapsed > MAX_APPROACH_DURATION:
                 self.cmd_pub.publish(Twist())
                 self.dock_state = None
                 self.dock_target = None
+                self.backing_start_rear = None
                 self.mode = 'nav'
                 self._start_relay()
                 self.get_logger().warn('⛔ 후진 도킹 타임아웃 — 중단')
-            elif (rear is not None and rear <= DOCK_APPROACH_STOP and
-                  (front is None or front >= DOCK_APPROACH_FRONT_MIN)):
+            elif moved > 0.15 and rear is not None and rear <= DOCK_APPROACH_STOP:
                 self.cmd_pub.publish(Twist())
                 label = '🅿️ 주차 완료!' if self.dock_target == 'park' else '🏠 ArUco 도킹 완료!'
                 self.dock_state = None
                 self.dock_target = None
                 self.mode = 'nav'
                 self.docked = True
+                self.backing_start_rear = None
                 self.get_logger().info(label + ' — nav 명령 시 전진 2m 탈출')
             else:
                 if self.backing_start_yaw is None:

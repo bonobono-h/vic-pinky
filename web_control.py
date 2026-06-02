@@ -50,6 +50,14 @@ selected_tool: str = None   # 현재 선택된 도구 key
 nav_start_time: float = None
 nav_lock = threading.Lock()
 
+delivery_done_station: int = None   # 배달 완료된 작업장 번호
+delivery_lock = threading.Lock()
+
+WORKSTATIONS = {
+    1: (-8.3141, -11.1439),
+    2: (-7.0176,  -5.0872),
+}
+
 CAM_UDP_PORT = 5006
 
 PILLAR_ANGLES_DEG = [162.0, 200.0, 245.3, 338.7, 23.3]
@@ -93,6 +101,12 @@ class ModePublisher(Node):
         )
         self.create_subscription(LaserScan, '/scan', self._lidar_cb, sensor_qos)
         self.create_subscription(Odometry, '/odom', self._odom_cb, sensor_qos)
+        self.create_subscription(String, '/delivery_done', self._delivery_done_cb, 10)
+
+    def _delivery_done_cb(self, msg):
+        global delivery_done_station
+        with delivery_lock:
+            delivery_done_station = int(msg.data)
 
     def set_mode(self, mode: str):
         self.current_mode = mode
@@ -457,8 +471,26 @@ HTML = """
       } catch(e) {}
     }
 
+    let deliveryDoneSpoken = false;
+    async function pollDelivery() {
+      try {
+        const res = await fetch('/delivery_status');
+        const d = await res.json();
+        if (d.done && !deliveryDoneSpoken) {
+          deliveryDoneSpoken = true;
+          const msg = voiceToolName
+            ? `${d.station}번 작업장에 ${voiceToolName}를 가져다드렸습니다.`
+            : `${d.station}번 작업장에 도착했습니다.`;
+          speak(msg);
+          document.getElementById('nav-arrived').style.display = 'block';
+        }
+        if (!d.done) deliveryDoneSpoken = false;
+      } catch(e) {}
+    }
+
     setInterval(updateDist, 300);
     setInterval(updateNavStatus, 500);
+    setInterval(pollDelivery, 800);
     updateDist();
 
     // ── 음성 명령 ──────────────────────────────────────────────
@@ -467,6 +499,10 @@ HTML = """
       '스패너':   'spanner',
       '망치':     'hammer',
       '도끼':     'axe',
+    };
+    const STATION_KEYWORDS = {
+      '1번': 1, '일번': 1, '일 번': 1, '1 번': 1, '첫번': 1, '첫 번': 1,
+      '2번': 2, '이번': 2, '이 번': 2, '2 번': 2,
     };
 
     let voiceToolName = null;
@@ -507,7 +543,55 @@ HTML = """
             if (text.includes(kw)) { matched = { kw, key }; break outer; }
           }
         }
-        if (matched) {
+        // 작업장 이동/배달 명령 파싱 (전체 후보에서 검색)
+        let deliverStation = null;
+        outerS: for (const text of candidates) {
+          for (const [kw, num] of Object.entries(STATION_KEYWORDS)) {
+            if (text.includes(kw)) { deliverStation = num; break outerS; }
+          }
+        }
+        const fullText = candidates.join(' ');
+        const isGoto = fullText.includes('이동') || fullText.includes('가줘') ||
+                       fullText.includes('가자') || fullText.includes('가주') ||
+                       fullText.includes('가세요') || fullText.includes('이동해');
+
+        // "1번 작업장으로" — 도구 없이 이동
+        if (deliverStation && !matched) {
+          (async () => {
+            await fetch(`/goto/${deliverStation}`, { method: 'POST' });
+            speak(`알겠습니다! ${deliverStation}번 작업장으로 이동합니다.`);
+            document.getElementById('nav-card').style.display = 'block';
+            document.getElementById('nav-arrived').style.display = 'none';
+            const badge = document.getElementById('badge');
+            badge.textContent = `${deliverStation}번 작업장`;
+            badge.className = 'mode-badge';
+            badge.style.background = '#1a2a4a';
+            badge.style.color = '#80cbc4';
+          })();
+        } else if (matched && deliverStation) {
+          voiceToolName = matched.kw;
+          arrivedSpoken = false;
+          (async () => {
+            await fetch(`/deliver/${deliverStation}`, { method: 'POST' });
+            let distText = '';
+            try {
+              const ns = await fetch('/nav_status');
+              const nd = await ns.json();
+              if (nd.distance > 0.3) {
+                distText = ` 이동거리는 약 ${(nd.distance).toFixed(0)}미터 정도이고, 소요시간은 약 ${nd.eta}초 정도입니다.`;
+              }
+            } catch(e) {}
+            speak(`알겠습니다! ${matched.kw} 가지러 공구실에 들렀다가 ${deliverStation}번 작업장으로 가겠습니다.${distText}`);
+            document.getElementById('tool-panel').style.display = 'none';
+            document.getElementById('nav-card').style.display = 'block';
+            document.getElementById('nav-arrived').style.display = 'none';
+            const badge = document.getElementById('badge');
+            badge.textContent = 'DELIVER';
+            badge.className = 'mode-badge';
+            badge.style.background = '#1a2a4a';
+            badge.style.color = '#80cbc4';
+          })();
+        } else if (matched) {
           voiceToolName = matched.kw;
           arrivedSpoken = false;
           (async () => {
@@ -516,14 +600,11 @@ HTML = """
             try {
               const ns = await fetch('/nav_status');
               const nd = await ns.json();
-              const dist = nd.distance;
-              const eta  = nd.eta;
-              if (dist > 0.3) {
-                distText = ` 이동거리는 약 ${dist.toFixed(0)}미터~ 정도이고, 소요시간은 약 ${eta}초~ 정도입니다.`;
+              if (nd.distance > 0.3) {
+                distText = ` 이동거리는 약 ${nd.distance.toFixed(0)}미터 정도이고, 소요시간은 약 ${nd.eta}초 정도입니다.`;
               }
             } catch(e) {}
-            speak(`알겠습니다! ${matched.kw} 가지러 출발합니다~${distText}`);
-            // UI 업데이트
+            speak(`알겠습니다! ${matched.kw} 가지러 출발합니다.${distText}`);
             document.getElementById('tool-panel').style.display = 'none';
             document.getElementById('nav-card').style.display = 'block';
             document.getElementById('nav-arrived').style.display = 'none';
@@ -615,6 +696,31 @@ def select_tool(tool_key: str):
     if ros_node:
         ros_node.set_mode('home')
     return {"status": "ok", "tool": tool_key}
+
+@app.post("/goto/{station}")
+def goto_station(station: int):
+    time.sleep(0.1)
+    if ros_node:
+        ros_node.set_mode(f'goto_{station}')
+    return {"status": "ok", "station": station}
+
+@app.post("/deliver/{station}")
+def deliver(station: int):
+    global selected_tool, nav_start_time, delivery_done_station
+    with nav_lock:
+        nav_start_time = time.time()
+    with delivery_lock:
+        delivery_done_station = None
+    time.sleep(0.1)
+    if ros_node:
+        ros_node.set_mode(f'deliver_{station}')
+    return {"status": "ok", "station": station}
+
+@app.get("/delivery_status")
+def delivery_status():
+    with delivery_lock:
+        done = delivery_done_station
+    return {"done": done is not None, "station": done}
 
 @app.get("/nav_status")
 def nav_status():

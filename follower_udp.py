@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 from ultralytics import YOLO
 import cv2
 import socket
@@ -23,6 +24,8 @@ class VicPinkyUdpFollower(Node):
         super().__init__('vic_pinky_udp_follower')
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         self.lidar_sub = self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
+        self.create_subscription(String, '/robot_mode', self._mode_cb, 10)
+        self.active = False
 
         # AI 모델 로드
         self.model = YOLO('yolov8n.pt')
@@ -75,7 +78,17 @@ class VicPinkyUdpFollower(Node):
         threading.Thread(target=self._vision_loop, daemon=True).start()
         self.create_timer(1.0 / 30.0, self._control_loop)
 
-        self.get_logger().info("🚀 멀티스레드 하이브리드(UDP+ROS2) AI 추종 시스템 가동 완료!")
+        self.get_logger().info("🚀 follower_udp 대기 중 — /robot_mode:follow 시 활성화")
+
+    def _mode_cb(self, msg):
+        mode = msg.data.strip().lower()
+        if mode == 'follow' and not self.active:
+            self.active = True
+            self.get_logger().info("👤 FOLLOW 활성화")
+        elif mode != 'follow' and self.active:
+            self.active = False
+            self.publisher.publish(Twist())
+            self.get_logger().info("👤 FOLLOW 비활성화")
 
     # ──────────────────────── 라이다 ────────────────────────
 
@@ -231,6 +244,8 @@ class VicPinkyUdpFollower(Node):
 
     def _control_loop(self):
         """초당 30번(30Hz) 실행되며 모터를 제어함"""
+        if not self.active:
+            return
         # 비전 스레드에서 최신 데이터 가져오기
         with self._det_lock:
             found = self._det_found
