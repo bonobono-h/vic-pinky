@@ -289,3 +289,26 @@
 │ 1 file changed, 293 insertions(+), 8 deletions(-)
 └─────────────────────────────────────────────┘
 
+┌─────────────────────────────────────────────┐
+│ 2026-06-02 19:27:49
+├─────────────────────────────────────────────┤
+│ 커밋   : e89a8f1
+│ 메시지 : 20260602_복도중앙주행-음성명령수정-데모데이준비
+│ 브랜치 : v2
+│ 작성자 : bonobono-h <bonobonoredh@gmail.com>
+├─────────────────────────────────────────────┤
+│ 변경된 파일
+  A  aruco_marker_0.png
+  A  aruco_marker_1.png
+  M  cam_udp_sender.py
+  M  follower_udp.py
+  M  maps/my_map.pgm
+  M  nav2.sh
+  M  nav2_params.yaml
+  A  nav2_params_2.yaml
+  M  web_control.py
+  M  yolo_nav_node.py
+│
+│ 10 files changed, 578 insertions(+), 41 deletions(-)
+└─────────────────────────────────────────────┘
+
