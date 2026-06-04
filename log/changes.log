@@ -312,3 +312,32 @@
 │ 10 files changed, 578 insertions(+), 41 deletions(-)
 └─────────────────────────────────────────────┘
 
+┌─────────────────────────────────────────────┐
+│ 2026-06-04 17:59:23
+├─────────────────────────────────────────────┤
+│ 커밋   : 9b25a80
+│ 메시지 : backup: 노트북 반납 전 전체 백업
+│ 브랜치 : v2
+│ 작성자 : bonobono-h <bonobonoredh@gmail.com>
+├─────────────────────────────────────────────┤
+│ 변경된 파일
+  A  "VicPinky_\354\244\221\352\260\204\353\260\234\355\221\234_20260521.pptx"
+  A  make_ppt.py
+  A  maps/my_map_backup.pgm
+  A  maps/my_map_cleaned.pgm
+  A  maps/my_map_lastF.pgm
+  A  maps/my_map_lastF1.pgm
+  A  maps/my_map_lastF_export.pgm
+  A  maps/my_map_lastF_fixed.pgm
+  A  my_map.pgm
+  A  my_map.yaml
+  A  my_map_backup.pgm
+  A  my_map_backup.yaml
+  A  my_map_new.pgm
+  A  my_map_new.yaml
+  A  nav2.rviz
+  A  yolov8n.pt
+│
+│ 16 files changed, 202174 insertions(+)
+└─────────────────────────────────────────────┘
+
